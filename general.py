@@ -74,7 +74,7 @@ def msg_handler(msg):
                 flag = False
             time.sleep(600)
 
-        # strting from the begining
+        # strting from the begining.
         user_information.clear()
 
 
