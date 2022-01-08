@@ -104,7 +104,7 @@ def run_web(id, year, specialty):
                 driver.find_element(By.XPATH, '//*[@id="evening-moreVisits"]/a').click()
             except:
                 pass
-            # Puts all the free time on the list.
+            # Puts all the free time on the list..
             for i in range(1, 20):
                 try:
                     times.append(
