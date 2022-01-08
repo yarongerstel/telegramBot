@@ -72,9 +72,10 @@ def msg_handler(msg):
                 for t in times:
                     bot.send_message(c.message.chat.id, t)
                 flag = False
+            # search eny ten minutes
             time.sleep(600)
 
-        # strting from the begining.
+        # starting from the beginning.
         user_information.clear()
 
 
