@@ -1,82 +1,130 @@
 from telebot import TeleBot, types
 import automation_fill
-import sys
 import datetime
 import time
+import threading
 
-times = []
-with open("key.txt", "r") as key:
-    API_KEY = key.read()
+WAITING_ID = "waiting_id"
+WAITING_YEAR = "waiting_year"
+WAITING_DATE = "waiting_date"
+WAITING_SPECIALTY = "waiting_specialty"
+SEARCHING = "searching"
+
+with open("key.txt", "r") as f:
+    API_KEY = f.read().strip()
 
 bot = TeleBot(API_KEY)
-user_information = []
+
+# Per-user state: {chat_id: {"state": ..., "id": ..., "year": ..., "date": ...}}
+user_data = {}
 
 
-@bot.message_handler(['start'])
+def init_user(chat_id):
+    user_data[chat_id] = {"state": WAITING_ID}
+
+
+@bot.message_handler(commands=["start"])
 def msg_start(msg):
-    bot.send_message(msg.chat.id, "ברוך הבא")
-    bot.send_message(msg.chat.id, "מהו מספר הזהות שלך?")
+    init_user(msg.chat.id)
+    bot.send_message(msg.chat.id, "ברוך הבא לבוט תורים של כללית 🏥")
+    bot.send_message(msg.chat.id, "מהו מספר הזהות שלך? (9 ספרות)")
 
 
-@bot.message_handler(content_types=['text'])
+@bot.message_handler(content_types=["text"])
 def msg_handler(msg):
-    if len(user_information) == 0:
-        while len(msg.text) != 9 or not msg.text.isnumeric():
-            bot.send_message(msg.chat.id, "כתוב תז ב-9 ספרות")
+    chat_id = msg.chat.id
+
+    if chat_id not in user_data:
+        bot.send_message(chat_id, "שלח /start כדי להתחיל")
+        return
+
+    state = user_data[chat_id]["state"]
+
+    if state == WAITING_ID:
+        if len(msg.text) != 9 or not msg.text.isnumeric():
+            bot.send_message(chat_id, "ת.ז. חייבת להיות 9 ספרות בדיוק. נסה שוב:")
             return
-        userid = msg.text
-        user_information.append(["id", userid])
-        bot.send_message(msg.chat.id, "יופי. באיזה שנה נולדת?")
+        user_data[chat_id]["id"] = msg.text
+        user_data[chat_id]["state"] = WAITING_YEAR
+        bot.send_message(chat_id, "יופי! באיזו שנה נולדת? (4 ספרות)")
 
-    if len(user_information) == 1:
-        while len(msg.text) != 4 or not msg.text.isnumeric():
-            bot.send_message(msg.chat.id, "כתוב שנה ב-4 ספרות")
+    elif state == WAITING_YEAR:
+        if len(msg.text) != 4 or not msg.text.isnumeric():
+            bot.send_message(chat_id, "שנה חייבת להיות 4 ספרות. נסה שוב:")
             return
-        useryear = msg.text
-        user_information.append(["year", useryear])
-        bot.send_message(msg.chat.id, "לפני איזה תאריך תרצה את התור?")
+        user_data[chat_id]["year"] = msg.text
+        user_data[chat_id]["state"] = WAITING_DATE
+        bot.send_message(chat_id, "לפני איזה תאריך תרצה את התור? (פורמט: DD.MM.YYYY)")
 
-    if len(user_information) == 2:
-
-        while len(msg.text) != 10 or not msg.text[:2].isnumeric() or not msg.text[3:5].isnumeric() or not msg.text[
-                                                                                                          6:].isnumeric():
-            bot.send_message(msg.chat.id, "כתוב בתבנית של : שנה.חודש.יום ")
+    elif state == WAITING_DATE:
+        try:
+            parts = msg.text.split(".")
+            if len(parts) != 3:
+                raise ValueError
+            d = datetime.datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+        except (ValueError, IndexError):
+            bot.send_message(chat_id, "תאריך לא תקין. כתוב בפורמט DD.MM.YYYY (למשל: 31.12.2025)")
             return
-        d = datetime.datetime(int(msg.text[6:]), int(msg.text[3:5]), int(msg.text[:2]))
-        user_information.append(["date", d])
+        user_data[chat_id]["date"] = d
+        user_data[chat_id]["state"] = WAITING_SPECIALTY
 
-    if len(user_information) == 3:
         keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name) for name
-                       in ['נשים', 'אף אוזן גרון', 'אורטופדיה']])
-        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name) for name
-                       in ['חירורג שד', 'עיניים', 'עור']])
-        msg = bot.send_message(msg.chat.id, 'בחר התמחות', reply_markup=keyboard)
-        user_information.append(["name", keyboard])
+        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name)
+                       for name in ["נשים", "אף אוזן גרון", "אורטופדיה"]])
+        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name)
+                       for name in ["חירורג שד", "עיניים", "עור"]])
+        bot.send_message(chat_id, "בחר התמחות:", reply_markup=keyboard)
 
-    @bot.callback_query_handler(func=lambda c: True)
-    def inline(c):
-        flag = True
-        bot.send_message(c.message.chat.id, c.data)
-        bot.send_message(c.message.chat.id, "מחפש אחר תור קרוב...")
-        while (flag):
-            date, location, name_doctor, times = automation_fill.run_web(user_information[0][1], user_information[1][1],
-                                                                         c.data)
-            d = date[-10:]
-            the_date = datetime.datetime(int(d[6:]), int(d[3:5]), int(d[:2]))
-            # if find queue early print and stop , else keep searching
-            if (user_information[2][1] > the_date):
-                bot.send_message(c.message.chat.id, date)
-                bot.send_message(c.message.chat.id, location)
-                bot.send_message(c.message.chat.id, name_doctor)
-                for t in times:
-                    bot.send_message(c.message.chat.id, t)
-                flag = False
-            # search eny ten minutes
-            time.sleep(600)
+    elif state == SEARCHING:
+        bot.send_message(chat_id, "כבר מחפש עבורך... שלח /start אם תרצה לבטל ולהתחיל מחדש.")
 
-        # starting from the beginning.
-        user_information.clear()
+
+@bot.callback_query_handler(func=lambda c: True)
+def inline_handler(c):
+    chat_id = c.message.chat.id
+
+    if chat_id not in user_data or user_data[chat_id].get("state") != WAITING_SPECIALTY:
+        return
+
+    specialty = c.data
+    user_data[chat_id]["state"] = SEARCHING
+
+    bot.send_message(chat_id, f"מחפש תור ב{specialty}...")
+
+    thread = threading.Thread(target=search_loop, args=(chat_id, specialty), daemon=True)
+    thread.start()
+
+
+def search_loop(chat_id, specialty):
+    data = user_data.get(chat_id)
+    if not data:
+        return
+
+    user_id = data["id"]
+    year = data["year"]
+    deadline = data["date"]
+
+    while user_data.get(chat_id, {}).get("state") == SEARCHING:
+        try:
+            date_str, location, name_doctor, times = automation_fill.run_web(user_id, year, specialty)
+
+            # parse the date returned (last 10 chars are DD.MM.YYYY)
+            d_part = date_str[-10:]
+            parts = d_part.split(".")
+            found_date = datetime.datetime(int(parts[2]), int(parts[1]), int(parts[0]))
+
+            if found_date < deadline:
+                bot.send_message(chat_id, f"מצאתי תור! 🎉\n📅 {date_str}\n📍 {location}\n👨‍⚕️ {name_doctor}")
+                if times:
+                    bot.send_message(chat_id, "שעות פנויות:\n" + "\n".join(times))
+                user_data.pop(chat_id, None)
+                return
+
+            bot.send_message(chat_id, f"התור הקרוב ביותר הוא {date_str} — עדיין רחוק מדי. אחפש שוב בעוד 10 דקות.")
+        except Exception as e:
+            bot.send_message(chat_id, "שגיאה בחיפוש, אנסה שוב בעוד 10 דקות.")
+
+        time.sleep(600)
 
 
 bot.polling()
