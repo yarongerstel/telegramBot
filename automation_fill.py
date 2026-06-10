@@ -1,6 +1,5 @@
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.by import By
 import time
@@ -16,7 +15,11 @@ SPECIALTIES = {
 
 
 def run_web(id, year, specialty):
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = webdriver.Chrome(options=options)  # Selenium Manager handles driver automatically
     try:
         driver.get('https://e-services.clalit.co.il/onlinewebquick/nvgq/tamuz/he-il')
 
