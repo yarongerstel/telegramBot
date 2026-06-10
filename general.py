@@ -3,6 +3,17 @@ import automation_fill
 import datetime
 import time
 import threading
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 WAITING_ID = "waiting_id"
 WAITING_YEAR = "waiting_year"
@@ -20,11 +31,12 @@ user_data = {}
 
 
 def init_user(chat_id):
-    # Stop any running search before resetting
     old = user_data.get(chat_id)
     if old and "stop_event" in old:
+        logger.info(f"[{chat_id}] Stopping existing search on re-init")
         old["stop_event"].set()
     user_data[chat_id] = {"state": WAITING_ID}
+    logger.info(f"[{chat_id}] User initialized")
 
 
 @bot.message_handler(commands=["start"])
@@ -116,6 +128,7 @@ def inline_handler(c):
     user_data[chat_id]["state"] = SEARCHING
     user_data[chat_id]["stop_event"] = stop_event
 
+    logger.info(f"[{chat_id}] Starting search: specialty={specialty}")
     bot.answer_callback_query(c.id)
     bot.send_message(chat_id, f"מחפש תור ב{specialty}... (שלח /cancel או לחץ ❌ כדי לעצור)")
 
@@ -154,6 +167,7 @@ def search_loop(chat_id, specialty, stop_event):
             bot.send_message(chat_id, f"התור הקרוב ביותר הוא {date_str} — עדיין רחוק מדי. אחפש שוב בעוד 10 דקות.")
 
         except Exception as e:
+            logger.error(f"[{chat_id}] Search error", exc_info=True)
             bot.send_message(chat_id, f"⚠️ שגיאה בחיפוש: {e}\nאנסה שוב בעוד 10 דקות. שלח /cancel לעצירה.")
 
         # Sleep in small intervals so cancel takes effect quickly
