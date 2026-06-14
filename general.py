@@ -1,229 +1,260 @@
-from telebot import TeleBot, types
-import automation_fill
-import datetime
-import time
-import threading
+#!/usr/bin/env python3
+"""Personal Assistant Telegram Bot — AI chat, web search, weather."""
+
+import os
 import logging
+import requests
+from telebot import TeleBot
+import anthropic
+from duckduckgo_search import DDGS
+
+# ── Logging ────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8"),
-    ],
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[logging.StreamHandler(), logging.FileHandler('bot.log')]
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-WAITING_ID = "waiting_id"
-WAITING_YEAR = "waiting_year"
-WAITING_DATE = "waiting_date"
-WAITING_OTP = "waiting_otp"
-WAITING_SPECIALTY = "waiting_specialty"
-SEARCHING = "searching"
+# ── Config ─────────────────────────────────────────────────────────────────────
 
-with open("key.txt", "r") as f:
-    API_KEY = f.read().strip()
-
-bot = TeleBot(API_KEY)
-
-# Per-user state: {chat_id: {"state": ..., "id": ..., "year": ..., "date": ..., "driver": ..., "stop_event": ...}}
-user_data = {}
-
-
-def _cleanup_user(chat_id):
-    """Stop search thread and close browser for this user."""
-    data = user_data.pop(chat_id, None)
-    if data:
-        if "stop_event" in data:
-            data["stop_event"].set()
-        if "driver" in data:
-            try:
-                data["driver"].quit()
-            except Exception:
-                pass
-        logger.info(f"[{chat_id}] Cleaned up user session")
-
-
-@bot.message_handler(commands=["start"])
-def msg_start(msg):
-    _cleanup_user(msg.chat.id)
-    user_data[msg.chat.id] = {"state": WAITING_ID}
-    logger.info(f"[{msg.chat.id}] /start")
-    bot.send_message(msg.chat.id, "ברוך הבא לבוט תורים של כללית 🏥")
-    bot.send_message(msg.chat.id, "מהו מספר הזהות שלך? (9 ספרות)")
-
-
-@bot.message_handler(commands=["cancel"])
-def msg_cancel(msg):
-    _cleanup_user(msg.chat.id)
-    logger.info(f"[{msg.chat.id}] /cancel")
-    bot.send_message(msg.chat.id, "החיפוש בוטל. שלח /start כדי להתחיל מחדש.")
-
-
-@bot.message_handler(content_types=["text"])
-def msg_handler(msg):
-    chat_id = msg.chat.id
-
-    if chat_id not in user_data:
-        bot.send_message(chat_id, "שלח /start כדי להתחיל")
-        return
-
-    state = user_data[chat_id]["state"]
-
-    if state == WAITING_ID:
-        if len(msg.text) != 9 or not msg.text.isnumeric():
-            bot.send_message(chat_id, "ת.ז. חייבת להיות 9 ספרות בדיוק. נסה שוב:")
-            return
-        user_data[chat_id]["id"] = msg.text
-        user_data[chat_id]["state"] = WAITING_YEAR
-        bot.send_message(chat_id, "יופי! באיזו שנה נולדת? (4 ספרות)")
-
-    elif state == WAITING_YEAR:
-        if len(msg.text) != 4 or not msg.text.isnumeric():
-            bot.send_message(chat_id, "שנה חייבת להיות 4 ספרות. נסה שוב:")
-            return
-        user_data[chat_id]["year"] = msg.text
-        user_data[chat_id]["state"] = WAITING_DATE
-        bot.send_message(chat_id, "לפני איזה תאריך תרצה את התור? (פורמט: DD.MM.YYYY)")
-
-    elif state == WAITING_DATE:
-        try:
-            parts = msg.text.split(".")
-            if len(parts) != 3:
-                raise ValueError
-            d = datetime.datetime(int(parts[2]), int(parts[1]), int(parts[0]))
-        except (ValueError, IndexError):
-            bot.send_message(chat_id, "תאריך לא תקין. כתוב בפורמט DD.MM.YYYY (למשל: 31.12.2025)")
-            return
-        user_data[chat_id]["date"] = d
-        # Start browser login in background, then ask for OTP
-        bot.send_message(chat_id, "מתחבר לאתר כללית... ⏳")
-        thread = threading.Thread(target=_do_login, args=(chat_id,), daemon=True)
-        thread.start()
-
-    elif state == WAITING_OTP:
-        otp = msg.text.strip()
-        logger.info(f"[{chat_id}] Received OTP")
-        bot.send_message(chat_id, "מאמת קוד... ⏳")
-        thread = threading.Thread(target=_do_enter_otp, args=(chat_id, otp), daemon=True)
-        thread.start()
-
-    elif state == WAITING_SPECIALTY:
-        bot.send_message(chat_id, "בחר התמחות מהכפתורים למעלה.")
-
-    elif state == SEARCHING:
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(types.InlineKeyboardButton(text="❌ בטל חיפוש", callback_data="__cancel__"))
-        bot.send_message(chat_id, "כבר מחפש עבורך...", reply_markup=keyboard)
-
-
-def _do_login(chat_id):
-    """Background thread: open browser and submit login form."""
-    data = user_data.get(chat_id)
-    if not data:
-        return
+def _load(env_var: str, file_name: str) -> str:
+    if val := os.getenv(env_var):
+        return val
     try:
-        driver = automation_fill.start_login(data["id"], data["year"])
-        user_data[chat_id]["driver"] = driver
-        user_data[chat_id]["state"] = WAITING_OTP
-        bot.send_message(chat_id, "נשלח אליך קוד SMS מכללית — הקלד אותו כאן:")
-    except Exception as e:
-        logger.error(f"[{chat_id}] Login failed", exc_info=True)
-        bot.send_message(chat_id, f"⚠️ שגיאה בהתחברות: {e}\nשלח /start לנסות שוב.")
-        _cleanup_user(chat_id)
+        return open(file_name).read().strip()
+    except FileNotFoundError:
+        return ''
 
+BOT_TOKEN     = _load('TELEGRAM_BOT_TOKEN', 'key.txt')
+ANTHROPIC_KEY = _load('ANTHROPIC_API_KEY',  'claude_key.txt')
 
-def _do_enter_otp(chat_id, otp):
-    """Background thread: enter OTP and show specialty keyboard."""
-    data = user_data.get(chat_id)
-    if not data or "driver" not in data:
-        bot.send_message(chat_id, "שגיאה — שלח /start להתחיל מחדש.")
-        return
+if not BOT_TOKEN:
+    raise RuntimeError("Telegram token not found. Set TELEGRAM_BOT_TOKEN or create key.txt")
+
+bot    = TeleBot(BOT_TOKEN)
+claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY) if ANTHROPIC_KEY else None
+
+# ── Conversation state ─────────────────────────────────────────────────────────
+
+histories: dict[int, list] = {}
+MAX_TURNS = 20
+
+# ── System prompt ──────────────────────────────────────────────────────────────
+
+SYSTEM = """אתה עוזר אישי חכם ומועיל.
+- ענה בעברית כברירת מחדל; עבור לשפת המשתמש אם הוא כותב בשפה אחרת.
+- השתמש בכלי search_web כשצריך מידע עדכני, חדשות, מחירים, עובדות ספציפיות, או כל דבר שיכול להשתנות עם הזמן.
+- השתמש בכלי get_weather כשמבקשים מזג אוויר.
+- ענה בצורה ידידותית, ברורה ותמציתית.
+- כשאתה מחפש, ציין בקצרה שאתה מחפש לפני שתציג תוצאות."""
+
+# ── Tool definitions ───────────────────────────────────────────────────────────
+
+TOOLS = [
+    {
+        "name": "search_web",
+        "description": (
+            "Search the internet for up-to-date information: news, prices, facts, "
+            "people, events, how-to guides, etc. Use this whenever the information "
+            "might be recent or you're not sure of the answer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search query. Use the most effective language for the topic."
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_weather",
+        "description": "Get current weather conditions and tomorrow's forecast for any city.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "City name, preferably in English or transliterated."
+                }
+            },
+            "required": ["city"]
+        }
+    }
+]
+
+# ── Tool implementations ───────────────────────────────────────────────────────
+
+def search_web(query: str) -> str:
     try:
-        automation_fill.enter_otp(data["driver"], otp)
-        user_data[chat_id]["state"] = WAITING_SPECIALTY
-
-        keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name)
-                       for name in ["נשים", "אף אוזן גרון", "אורטופדיה"]])
-        keyboard.add(*[types.InlineKeyboardButton(text=name, callback_data=name)
-                       for name in ["חירורג שד", "עיניים", "עור"]])
-        bot.send_message(chat_id, "התחברת בהצלחה! בחר התמחות:", reply_markup=keyboard)
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        if not results:
+            return "לא נמצאו תוצאות לחיפוש זה."
+        lines = [f"תוצאות חיפוש עבור '{query}':\n"]
+        for i, r in enumerate(results, 1):
+            body = r.get('body', '')[:300]
+            lines.append(f"{i}. {r.get('title', '')}\n{body}\n{r.get('href', '')}\n")
+        return "\n".join(lines)
     except Exception as e:
-        logger.error(f"[{chat_id}] OTP entry failed", exc_info=True)
-        bot.send_message(chat_id, f"⚠️ שגיאה באימות הקוד: {e}\nנסה שוב — הקלד את הקוד:")
-        user_data[chat_id]["state"] = WAITING_OTP
+        log.error("search error: %s", e)
+        return f"שגיאה בחיפוש: {e}"
 
 
-@bot.callback_query_handler(func=lambda c: True)
-def inline_handler(c):
-    chat_id = c.message.chat.id
+def get_weather(city: str) -> str:
+    try:
+        url = f"https://wttr.in/{requests.utils.quote(city)}?format=j1"
+        data = requests.get(url, timeout=10).json()
 
-    if c.data == "__cancel__":
-        _cleanup_user(chat_id)
-        bot.answer_callback_query(c.id)
-        bot.send_message(chat_id, "החיפוש בוטל. שלח /start להתחיל מחדש.")
-        return
+        cur       = data['current_condition'][0]
+        area      = data['nearest_area'][0]
+        city_name = area['areaName'][0]['value']
+        country   = area['country'][0]['value']
 
-    if chat_id not in user_data or user_data[chat_id].get("state") != WAITING_SPECIALTY:
-        bot.answer_callback_query(c.id)
-        return
+        desc  = cur['weatherDesc'][0]['value']
+        temp  = cur['temp_C']
+        feels = cur['FeelsLikeC']
+        humid = cur['humidity']
+        wind  = cur['windspeedKmph']
 
-    specialty = c.data
-    stop_event = threading.Event()
-    user_data[chat_id]["state"] = SEARCHING
-    user_data[chat_id]["stop_event"] = stop_event
+        lines = [
+            f"מזג אוויר ב-{city_name}, {country}:",
+            f"מצב: {desc}",
+            f"טמפרטורה: {temp}°C (מרגיש כמו {feels}°C)",
+            f"לחות: {humid}%  |  רוח: {wind} קמ\"ש",
+        ]
 
-    logger.info(f"[{chat_id}] Starting search: specialty={specialty}")
-    bot.answer_callback_query(c.id)
-    bot.send_message(chat_id, f"מחפש תור ב{specialty}... (שלח /cancel כדי לעצור)")
+        if len(data['weather']) > 1:
+            tmr      = data['weather'][1]
+            tmr_desc = tmr['hourly'][4]['weatherDesc'][0]['value']
+            lines.append(
+                f"\nמחר: {tmr_desc}, {tmr['mintempC']}°C – {tmr['maxtempC']}°C"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        log.error("weather error: %s", e)
+        return f"לא הצלחתי לקבל מזג אוויר עבור '{city}'. נסה עיר באנגלית."
 
-    thread = threading.Thread(target=search_loop, args=(chat_id, specialty, stop_event), daemon=True)
-    thread.start()
 
+TOOL_FUNCS = {
+    "search_web": lambda inp: search_web(inp["query"]),
+    "get_weather": lambda inp: get_weather(inp["city"]),
+}
 
-def search_loop(chat_id, specialty, stop_event):
-    data = user_data.get(chat_id)
-    if not data:
-        return
+# ── AI chat with tool-use loop ─────────────────────────────────────────────────
 
-    driver = data["driver"]
-    deadline = data["date"]
+def chat(chat_id: int, user_text: str) -> str:
+    if not claude:
+        return (
+            "⚠️ מפתח Anthropic API לא הוגדר.\n"
+            "הוסף את ANTHROPIC_API_KEY כמשתנה סביבה, או צור קובץ claude_key.txt עם המפתח."
+        )
 
-    while not stop_event.is_set():
+    hist = histories.setdefault(chat_id, [])
+    hist.append({"role": "user", "content": user_text})
+    if len(hist) > MAX_TURNS:
+        hist[:] = hist[-MAX_TURNS:]
+
+    messages = list(hist)
+
+    for _ in range(6):      # allow up to 6 tool-use rounds
+        resp = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=2048,
+            system=SYSTEM,
+            tools=TOOLS,
+            messages=messages,
+        )
+
+        if resp.stop_reason == "tool_use":
+            tool_results = []
+            for blk in resp.content:
+                if blk.type == "tool_use":
+                    fn     = TOOL_FUNCS.get(blk.name)
+                    result = fn(blk.input) if fn else "כלי לא ידוע"
+                    log.info("tool %s(%s) => %.80s…", blk.name, blk.input, result)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": blk.id,
+                        "content": result,
+                    })
+            messages.append({"role": "assistant", "content": resp.content})
+            messages.append({"role": "user",      "content": tool_results})
+        else:
+            answer = "".join(
+                blk.text for blk in resp.content if hasattr(blk, "text")
+            )
+            hist.append({"role": "assistant", "content": answer})
+            return answer
+
+    return "מצטער, לא הצלחתי לעבד את הבקשה. נסה שוב."
+
+# ── Message helper ─────────────────────────────────────────────────────────────
+
+def send(chat_id: int, text: str):
+    """Send a message; split at 4000 chars; fall back from Markdown to plain."""
+    for chunk in [text[i:i + 4000] for i in range(0, len(text), 4000)]:
         try:
-            date_str, location, name_doctor, times = automation_fill.search_once(driver, specialty)
+            bot.send_message(chat_id, chunk, parse_mode='Markdown')
+        except Exception:
+            bot.send_message(chat_id, chunk)
 
-            if stop_event.is_set():
-                return
+# ── Handlers ───────────────────────────────────────────────────────────────────
 
-            d_part = date_str[-10:]
-            parts = d_part.split(".")
-            found_date = datetime.datetime(int(parts[2]), int(parts[1]), int(parts[0]))
-
-            if found_date < deadline:
-                bot.send_message(chat_id, f"מצאתי תור! 🎉\n📅 {date_str}\n📍 {location}\n👨‍⚕️ {name_doctor}")
-                if times:
-                    bot.send_message(chat_id, "שעות פנויות:\n" + "\n".join(times))
-                _cleanup_user(chat_id)
-                return
-
-            bot.send_message(chat_id, f"התור הקרוב ביותר הוא {date_str} — עדיין רחוק מדי. אחפש שוב בעוד 10 דקות.")
-
-        except Exception as e:
-            logger.error(f"[{chat_id}] Search error", exc_info=True)
-            # If session expired, ask user to re-login
-            if "session" in str(e).lower() or "invalid session" in str(e).lower():
-                bot.send_message(chat_id, "⚠️ פג תוקף החיבור לכללית. שלח /start להתחבר מחדש.")
-                _cleanup_user(chat_id)
-                return
-            bot.send_message(chat_id, f"⚠️ שגיאה בחיפוש: {e}\nאנסה שוב בעוד 10 דקות. שלח /cancel לעצירה.")
-
-        for _ in range(60):
-            if stop_event.is_set():
-                return
-            time.sleep(10)
+@bot.message_handler(commands=['start'])
+def on_start(msg):
+    send(msg.chat.id,
+         "👋 *שלום! אני העוזר האישי שלך.*\n\n"
+         "אני יכול לעזור לך עם:\n"
+         "🗣 שאלות ושיחות — כתוב לי כל דבר\n"
+         "🔍 חיפוש באינטרנט — 'חפש לי...'\n"
+         "🌤 מזג אוויר — 'מה מזג האוויר בתל אביב?'\n"
+         "📰 חדשות — 'מה קורה היום בישראל?'\n"
+         "✍️ כתיבה — מיילים, תרגומים, סיכומים\n\n"
+         "/clear לנקות זיכרון השיחה | /help לעזרה\n\n"
+         "מה תרצה? 😊")
 
 
-bot.polling()
+@bot.message_handler(commands=['help'])
+def on_help(msg):
+    send(msg.chat.id,
+         "📋 *עזרה*\n\n"
+         "פשוט כתוב לי מה אתה צריך. לדוגמה:\n\n"
+         "• 'מה מזג האוויר בחיפה מחר?'\n"
+         "• 'חפש חדשות ספורט'\n"
+         "• 'תרגם לאנגלית: אני אוהב פיצה'\n"
+         "• 'כתוב לי מייל מקצועי בנושא...'\n"
+         "• 'מה ההבדל בין Python ל-JavaScript?'\n\n"
+         "*פקודות:*\n"
+         "/clear — מחק היסטוריית שיחה (זיכרון חדש)\n"
+         "/start — הודעת פתיחה")
+
+
+@bot.message_handler(commands=['clear'])
+def on_clear(msg):
+    histories[msg.chat.id] = []
+    bot.send_message(msg.chat.id, "✅ היסטוריית השיחה נוקתה. מתחילים מחדש!")
+
+
+@bot.message_handler(func=lambda m: m.text is not None)
+def on_text(msg):
+    bot.send_chat_action(msg.chat.id, 'typing')
+    try:
+        reply = chat(msg.chat.id, msg.text)
+        send(msg.chat.id, reply)
+    except anthropic.APIError as e:
+        log.error("Claude API error: %s", e)
+        bot.send_message(msg.chat.id, "⚠️ שגיאה בתקשורת עם ה-AI. נסה שוב.")
+    except Exception as e:
+        log.error("Unexpected error: %s", e)
+        bot.send_message(msg.chat.id, "⚠️ אירעה שגיאה. נסה שוב.")
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+if __name__ == '__main__':
+    log.info("Personal assistant bot starting…")
+    bot.infinity_polling(interval=1, timeout=30)

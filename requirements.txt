@@ -1,3 +1,4 @@
-pyTelegramBotAPI==4.2.2
-selenium>=4.6.0
-webdriver-manager>=4.0.0
+pyTelegramBotAPI>=4.2.2
+anthropic>=0.20.0
+duckduckgo-search>=6.0.0
+requests>=2.31.0

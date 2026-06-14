@@ -1,4 +1,6 @@
 key.txt
+claude_key.txt
 __pycache__/
 *.pyc
 .env
+bot.log
